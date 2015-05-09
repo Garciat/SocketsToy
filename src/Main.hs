@@ -157,47 +157,46 @@ server sock addr = do
     handleMessage _ (Just "") = putStrLn "Client left."
     
     handleMessage client (Just msg) = do
-      case (parse request "stdin" msg) of
-        Left err  -> sendBadRequest client (show err)
-        Right req -> catch (sendOk client req) (handleException client req)
+      res <-
+        case (parse request "stdin" msg) of
+          Left err  -> badRequest err
+          Right req -> catch (process req) (ise req)
+      sendResponse res client
     
     defaultHeaders = [GenericHttpHeader "Connection" "close"]
     
-    sendBadRequest client err = do
-      let res = HttpResponse "HTTP/1.1" (StatusCode 400 "Bad Request") defaultHeaders (Just $ BS8.pack err)
-      sendResponse res client
-    
-    handleException client req (SomeException e) = do
+    badRequest e = do
       let err = show e
-      let res = HttpResponse "HTTP/1.1" (StatusCode 500 "Internal Server Error") defaultHeaders (Just $ BS8.pack err)
-      sendResponse res client
+      return $ HttpResponse "HTTP/1.1" (StatusCode 400 "Bad Request") defaultHeaders (Just $ BS8.pack err)
     
-    sendOk client req = do
+    ise req (SomeException e) = do
+      let err = show e
+      return $ HttpResponse "HTTP/1.1" (StatusCode 500 "Internal Server Error") defaultHeaders (Just $ BS8.pack err)
+    
+    process req = do
       let path = Path.decodeString $ uriPath $ reqURI req
       isDir <- FS.isDirectory path
       if isDir then
-        sendDirList client path
+        dirList path
       else
-        sendFile client path
+        fileRes path
     
-    sendDirList client path = do
+    dirList path = do
       entries <- FS.listDirectory path
       let body = BS8.pack $ unlines $ map Path.encodeString entries
       let hs = defaultHeaders
                 ++ [GenericHttpHeader "Content-Type" "text/plain"]
                 ++ [GenericHttpHeader "Content-Length" (show $ BS.length body)]
-      let res = HttpResponse "HTTP/1.1" (StatusCode 200 "OK") hs (Just body)
-      sendResponse res client
+      return $ HttpResponse "HTTP/1.1" (StatusCode 200 "OK") hs (Just body)
     
-    sendFile client path = do
+    fileRes path = do
       bytes <- FS.readFile path
       let body = bytes
       let mime = T.unpack $ T.decodeUtf8 $ defaultMimeLookup (T.pack $ Path.encodeString path)
       let hs = defaultHeaders
                 ++ [GenericHttpHeader "Content-Type" mime]
                 ++ [GenericHttpHeader "Content-Length" (show $ BS.length body)]
-      let res = HttpResponse "HTTP/1.1" (StatusCode 200 "OK") hs (Just bytes)
-      sendResponse res client
+      return $ HttpResponse "HTTP/1.1" (StatusCode 200 "OK") hs (Just bytes)
 
 main = do
   [addr, portS] <- getArgs
