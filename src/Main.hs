@@ -6,12 +6,19 @@ import Text.Parsec
 import Text.Parsec.String (Parser)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
+import qualified Data.ByteString as BS
 
 import System.Environment
 import System.Timeout
 import Control.Monad
+import Control.Exception
 import Control.Concurrent
 import Network.Socket
+import Network.URI
+import Network.Mime
+import qualified Filesystem as FS
+import qualified Filesystem.Path as Path
+import qualified Filesystem.Path.CurrentOS as Path
 
 ignore :: Monad m => m ()
 ignore = return ()
@@ -23,10 +30,12 @@ ofShow x = do
 
 newtype Uri = Uri String deriving (Show, Eq)
 
-uri :: Parser Uri
+uri :: Parser URI
 uri = do
-  s <- many1 (letter <|> digit <|> oneOf "/-._~")
-  return (Uri s)
+  s <- many1 (noneOf " ")
+  case parseRelativeReference s of
+    Nothing  -> unexpected "Invalid URI."
+    Just uri -> return uri
 
 data StdHttpMethod = OPTIONS
                    | GET
@@ -86,7 +95,7 @@ fromHeaders :: [HttpHeader] -> String
 fromHeaders hs = concat $ map fromHeader hs
 
 data HttpRequest = HttpRequest { reqMethod :: HttpMethod
-                               , reqUri :: Uri
+                               , reqURI :: URI
                                , reqVersion :: String
                                , reqHeaders :: [HttpHeader]
                                } deriving (Show)
@@ -149,7 +158,7 @@ server sock addr = do
     handleMessage client (Just msg) = do
       case (parse request "stdin" msg) of
         Left err  -> sendBadRequest client (show err)
-        Right req -> sendOk client
+        Right req -> catch (sendOk client req) (handleException client req)
     
     defaultHeaders = [GenericHttpHeader "Connection" "close"]
     
@@ -157,8 +166,38 @@ server sock addr = do
       let res = HttpResponse "HTTP/1.1" (StatusCode 400 "Bad Request") defaultHeaders (Just $ T.pack err)
       send client (fromResponse res) >> ignore
     
-    sendOk client = do
+    handleException client req (SomeException e) = do
+      let err = show e
+      let res = HttpResponse "HTTP/1.1" (StatusCode 500 "Internal Server Error") defaultHeaders (Just $ T.pack err)
+      send client (fromResponse res) >> ignore
+    
+    sendOk client req = do
       let res = HttpResponse "HTTP/1.1" (StatusCode 200 "OK") defaultHeaders Nothing
+      let path = Path.decodeString $ uriPath $ reqURI req
+      isDir <- FS.isDirectory path
+      if isDir then
+        sendDirList client path
+      else
+        sendFile client path
+      send client (fromResponse res) >> ignore
+    
+    sendDirList client path = do
+      entries <- FS.listDirectory path
+      let body = T.pack $ unlines $ map Path.encodeString entries
+      let hs = defaultHeaders
+                ++ [GenericHttpHeader "Content-Type" "text/plain"]
+                ++ [GenericHttpHeader "Content-Length" (show $ T.length body)]
+      let res = HttpResponse "HTTP/1.1" (StatusCode 200 "OK") hs (Just body)
+      send client (fromResponse res) >> ignore
+    
+    sendFile client path = do
+      bytes <- FS.readFile path
+      let body = T.decodeUtf8 bytes
+      let mime = T.unpack $ T.decodeUtf8 $ defaultMimeLookup (T.pack $ Path.encodeString path)
+      let hs = defaultHeaders
+                ++ [GenericHttpHeader "Content-Type" mime]
+                ++ [GenericHttpHeader "Content-Length" (show $ T.length body)]
+      let res = HttpResponse "HTTP/1.1" (StatusCode 200 "OK") hs (Just body)
       send client (fromResponse res) >> ignore
 
 main = do
