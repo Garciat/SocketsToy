@@ -146,9 +146,10 @@ server sock addr = do
   tid <- forkOS $ forever $ do
     (client, clientAddr) <- accept sock
     putStrLn $ ("Client: " ++ show clientAddr)
-    msgM <- timeout 5000000 (recv client 4096)
-    handleMessage client msgM
-    close client
+    forkIO $ do
+      msgM <- timeout 5000000 (recv client 4096)
+      handleMessage client msgM
+      close client
   _ <- getLine
   killThread tid
   putStrLn "Bye."
