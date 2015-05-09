@@ -7,6 +7,7 @@ import Text.Parsec.String (Parser)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BS8
 
 import System.Environment
 import System.Timeout
@@ -14,6 +15,7 @@ import Control.Monad
 import Control.Exception
 import Control.Concurrent
 import Network.Socket
+import qualified Network.Socket.ByteString as BS
 import Network.URI
 import Network.Mime
 import qualified Filesystem as FS
@@ -124,20 +126,19 @@ fromStatusCode (StatusCode i s) = show i ++ " " ++ s
 data HttpResponse = HttpResponse { resVersion :: String
                                  , resStatus :: StatusCode
                                  , resHeaders :: [HttpHeader]
-                                 , resBody :: Maybe T.Text
+                                 , resBody :: Maybe BS.ByteString
                                  } deriving (Show)
 
-fromResponse :: HttpResponse -> String
-fromResponse res =
-  resVersion res
-  ++ " "
-  ++ fromStatusCode (resStatus res)
-  ++ "\r\n"
-  ++ fromHeaders (resHeaders res)
-  ++ "\r\n"
-  ++ case resBody res of
-        Nothing   -> ""
-        Just body -> T.unpack body
+sendResponse :: HttpResponse -> Socket -> IO ()
+sendResponse res sock = do
+  BS.sendAll sock (BS8.pack responseHead)
+  case resBody res of
+    Nothing   -> ignore
+    Just body -> BS.sendAll sock body
+  where
+    responseHead = resVersion res ++ " "
+                    ++ fromStatusCode (resStatus res) ++ "\r\n"
+                    ++ fromHeaders (resHeaders res) ++ "\r\n"
 
 server sock addr = do
   bind sock (addrAddress addr)
@@ -163,42 +164,40 @@ server sock addr = do
     defaultHeaders = [GenericHttpHeader "Connection" "close"]
     
     sendBadRequest client err = do
-      let res = HttpResponse "HTTP/1.1" (StatusCode 400 "Bad Request") defaultHeaders (Just $ T.pack err)
-      send client (fromResponse res) >> ignore
+      let res = HttpResponse "HTTP/1.1" (StatusCode 400 "Bad Request") defaultHeaders (Just $ BS8.pack err)
+      sendResponse res client
     
     handleException client req (SomeException e) = do
       let err = show e
-      let res = HttpResponse "HTTP/1.1" (StatusCode 500 "Internal Server Error") defaultHeaders (Just $ T.pack err)
-      send client (fromResponse res) >> ignore
+      let res = HttpResponse "HTTP/1.1" (StatusCode 500 "Internal Server Error") defaultHeaders (Just $ BS8.pack err)
+      sendResponse res client
     
     sendOk client req = do
-      let res = HttpResponse "HTTP/1.1" (StatusCode 200 "OK") defaultHeaders Nothing
       let path = Path.decodeString $ uriPath $ reqURI req
       isDir <- FS.isDirectory path
       if isDir then
         sendDirList client path
       else
         sendFile client path
-      send client (fromResponse res) >> ignore
     
     sendDirList client path = do
       entries <- FS.listDirectory path
-      let body = T.pack $ unlines $ map Path.encodeString entries
+      let body = BS8.pack $ unlines $ map Path.encodeString entries
       let hs = defaultHeaders
                 ++ [GenericHttpHeader "Content-Type" "text/plain"]
-                ++ [GenericHttpHeader "Content-Length" (show $ T.length body)]
+                ++ [GenericHttpHeader "Content-Length" (show $ BS.length body)]
       let res = HttpResponse "HTTP/1.1" (StatusCode 200 "OK") hs (Just body)
-      send client (fromResponse res) >> ignore
+      sendResponse res client
     
     sendFile client path = do
       bytes <- FS.readFile path
-      let body = T.decodeUtf8 bytes
+      let body = bytes
       let mime = T.unpack $ T.decodeUtf8 $ defaultMimeLookup (T.pack $ Path.encodeString path)
       let hs = defaultHeaders
                 ++ [GenericHttpHeader "Content-Type" mime]
-                ++ [GenericHttpHeader "Content-Length" (show $ T.length body)]
-      let res = HttpResponse "HTTP/1.1" (StatusCode 200 "OK") hs (Just body)
-      send client (fromResponse res) >> ignore
+                ++ [GenericHttpHeader "Content-Length" (show $ BS.length body)]
+      let res = HttpResponse "HTTP/1.1" (StatusCode 200 "OK") hs (Just bytes)
+      sendResponse res client
 
 main = do
   [addr, portS] <- getArgs
