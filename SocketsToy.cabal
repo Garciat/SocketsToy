@@ -19,7 +19,9 @@ executable SocketsToy
   main-is:             Main.hs
   -- other-modules:       
   -- other-extensions:    
+  ghc-options: -threaded
   build-depends:
-    base >=4.8 && <4.9, parsec ==3.1.9, text ==1.2.0.4
+    base >=4.8 && <4.9, parsec ==3.1.9, text ==1.2.0.4,
+    network >=2.6.1.0
   hs-source-dirs:      src
   default-language:    Haskell2010

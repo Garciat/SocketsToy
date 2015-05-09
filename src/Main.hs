@@ -7,6 +7,13 @@ import Text.Parsec.String (Parser)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 
+import System.Environment
+import System.Timeout
+import Control.Monad
+import Control.Concurrent
+import Network.Socket
+
+ignore :: Monad m => m ()
 ignore = return ()
 
 ofShow :: Show a => a -> Parser a
@@ -123,9 +130,43 @@ fromResponse res =
         Nothing   -> ""
         Just body -> T.unpack body
 
+server sock addr = do
+  bind sock (addrAddress addr)
+  listen sock 2
+  tid <- forkOS $ forever $ do
+    (client, clientAddr) <- accept sock
+    putStrLn $ ("Client: " ++ show clientAddr)
+    msgM <- timeout 5000000 (recv client 4096)
+    handleMessage client msgM
+    close client
+  _ <- getLine
+  killThread tid
+  putStrLn "Bye."
+  where
+    handleMessage _ Nothing   = putStrLn "Request timeout."
+    handleMessage _ (Just "") = putStrLn "Client left."
+    
+    handleMessage client (Just msg) = do
+      case (parse request "stdin" msg) of
+        Left err  -> sendBadRequest client (show err)
+        Right req -> sendOk client
+    
+    defaultHeaders = [GenericHttpHeader "Connection" "close"]
+    
+    sendBadRequest client err = do
+      let res = HttpResponse "HTTP/1.1" (StatusCode 400 "Bad Request") defaultHeaders (Just $ T.pack err)
+      send client (fromResponse res) >> ignore
+    
+    sendOk client = do
+      let res = HttpResponse "HTTP/1.1" (StatusCode 200 "OK") defaultHeaders Nothing
+      send client (fromResponse res) >> ignore
+
 main = do
-  putStr $ fromResponse $ HttpResponse "HTTP/1.1" (StatusCode 200 "OK") [] Nothing
-  input <- getContents
-  case (parse request "stdin" input) of
-    Left err  -> print err
-    Right req -> print req
+  [addr, portS] <- getArgs
+  let hints = defaultHints { addrFlags = [AI_ADDRCONFIG, AI_CANONNAME] }
+  addrs <- getAddrInfo (Just hints) (Just addr) (Just portS)
+  let addr = head addrs
+  putStrLn $ ("Addr: " ++ show addr)
+  sock <- socket (addrFamily addr) (addrSocketType addr) (addrProtocol addr)
+  server sock addr
+  close sock
