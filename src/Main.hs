@@ -132,7 +132,7 @@ fromResponse res =
 
 server sock addr = do
   bind sock (addrAddress addr)
-  listen sock 2
+  listen sock sOMAXCONN
   tid <- forkOS $ forever $ do
     (client, clientAddr) <- accept sock
     putStrLn $ ("Client: " ++ show clientAddr)
